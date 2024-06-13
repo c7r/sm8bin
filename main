@@ -1,0 +1,132 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <esp_sleep.h>
+
+// Ultraschallsensor Pins
+const int trigPin = 12;
+const int echoPin = 14;
+
+// Kippschalter Pins
+const int powerSwitchPin = 26; // Schalter 1: Ein/Aus
+const int modeSwitchPin = 27;  // Schalter 2: Mess-Modus/Entnahme-Modus
+
+// ADC Pin für Batteriespannung
+const int batteryPin = 35; // ADC1_CHANNEL_7 entspricht GPIO35
+
+// LED Pins
+const int ledRedPin = 32;
+const int ledYellowPin = 33;
+const int ledGreenPin = 25;
+
+// WLAN Konfiguration
+const char* ssid = "Your_SSID";
+const char* password = "Your_PASSWORD";
+
+WebServer server(80);
+
+// Funktion zur Messung des Füllstands
+long measureDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH);
+  long distance = duration * 0.034 / 2;
+  return distance;
+}
+
+// Funktion zur Messung der Batteriespannung
+float measureBatteryVoltage() {
+  int raw = analogRead(batteryPin);
+  float voltage = raw * (3.3 / 4095.0) * 2; // Annahme eines Spannungsteilers 1:1
+  return voltage;
+}
+
+// Funktion zur Steuerung der LEDs
+void setLED(int red, int yellow, int green) {
+  digitalWrite(ledRedPin, red);
+  digitalWrite(ledYellowPin, yellow);
+  digitalWrite(ledGreenPin, green);
+}
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(powerSwitchPin, INPUT_PULLUP);
+  pinMode(modeSwitchPin, INPUT_PULLUP);
+
+  // LED Pins als Ausgang
+  pinMode(ledRedPin, OUTPUT);
+  pinMode(ledYellowPin, OUTPUT);
+  pinMode(ledGreenPin, OUTPUT);
+
+  Serial.begin(115200);
+
+  // Schalter überprüfen
+  if (digitalRead(powerSwitchPin) == LOW) {
+    esp_deep_sleep_start();
+  } else {
+    // Grüne LED für 5 Sekunden aufleuchten lassen
+    setLED(LOW, LOW, HIGH);
+    delay(5000);
+    setLED(LOW, LOW, LOW);
+  }
+
+  // Initialisierung von WLAN
+  if (digitalRead(modeSwitchPin) == LOW) {
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(1000);
+      Serial.println("Connecting to WiFi...");
+    }
+    Serial.println("Connected to WiFi");
+
+    // Gelbe LED leuchtet während der Webserver im Datenaustausch ist
+    setLED(LOW, HIGH, LOW);
+
+    // Webserver Endpunkt definieren
+    server.on("/data", HTTP_GET, []() {
+      long distance = measureDistance();
+      float batteryVoltage = measureBatteryVoltage();
+      StaticJsonDocument<200> doc;
+      doc["distance"] = distance;
+      doc["timestamp"] = millis();
+      doc["battery_voltage"] = batteryVoltage;
+      String json;
+      serializeJson(doc, json);
+      server.send(200, "application/json", json);
+    });
+
+    server.begin();
+  }
+}
+
+void loop() {
+  if (digitalRead(modeSwitchPin) == LOW) {
+    server.handleClient();
+  } else {
+    long distance = measureDistance();
+    float batteryVoltage = measureBatteryVoltage();
+    Serial.print("Distance: ");
+    Serial.println(distance);
+    Serial.print("Battery Voltage: ");
+    Serial.println(batteryVoltage);
+    
+    // Messdaten speichern (hier vereinfacht nur Serial-Ausgabe)
+    // Speichermechanismen wie EEPROM oder SD-Karte können verwendet werden
+
+    // ESP32 in Deep Sleep Modus versetzen
+    esp_sleep_enable_timer_wakeup(3 * 3600 * 1000000); // 3 Stunden
+    esp_deep_sleep_start();
+  }
+}
+
+// Fehlerbehandlung (Beispielhafte Funktion)
+void handleError() {
+  // Rote LED dauerhaft einschalten
+  setLED(HIGH, LOW, LOW);
+  // Fehlerbehandlungscode hier
+}
