@@ -1,0 +1,43 @@
+#include <HCSR04.h>
+#include <esp_sleep.h>
+
+UltraSonicDistanceSensor distanceSensor(18, 15);
+#define uS_TO_S_FACTOR 1000000ULL // Umrechnungsfaktor für Sekunden zu Mikrosekunden
+#define TIME_TO_SLEEP  60         // Zeit in Sekunden im Deepsleep-Modus
+char incomingByte = Serial.read();
+
+RTC_DATA_ATTR float sensorData; // Variable zum Speichern der Sensor-Daten
+
+void setup() {
+  // Initialisiere die serielle Kommunikation bei 115200 Baud
+  Serial.begin(921600);
+  // Warte, bis die serielle Verbindung hergestellt ist
+  while (!Serial) { //serielle Verbindung nicht aufgebaut, also während der Sensor arbeitet und nichtt angesteckt ist
+   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  switch(wakeup_reason) {
+    case ESP_SLEEP_WAKEUP_TIMER: 
+      Serial.println("Aufgewacht durch Timer");
+      break;
+    default: 
+      Serial.println("Aufgewacht durch andere Ursache");
+      break;
+  }
+  }
+
+
+
+
+  Serial.println("Serial communication started");
+  if (Serial.available() > 0) {
+  if (serial.read() == "lesen"){
+
+    //gibt den Flash storage als Array aus. (Array so modulieren dass Daten direkt auslesbar sind)
+    
+  }
+  }
+
+}
+
+void loop() {
+
+  }
