@@ -23,21 +23,14 @@ void setup() {
       break;
   }
   }
-
-
-
-
   Serial.println("Serial communication started");
   if (Serial.available() > 0) {
   if (serial.read() == "lesen"){
 
-    //gibt den Flash storage als Array aus. (Array so modulieren dass Daten direkt auslesbar sind)
-    
+    //gibt den Flash storage als Array aus. (Array so modulieren dass Daten direkt auslesbar sind)    
   }
   }
-
 }
-
 void loop() {
 
   }
