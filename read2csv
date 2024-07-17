@@ -1,0 +1,38 @@
+import serial
+import pandas as pd
+from datetime import datetime
+
+# Configure the serial port (replace 'COM3' with your serial port)
+ser = serial.Serial('COM3', 921600, timeout=1)
+
+# Create an empty DataFrame to store the data
+data = pd.DataFrame(columns=['DateTime', 'Distance'])
+
+try:
+    while True:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8').strip()
+            if "Distance" in line:
+                parts = line.split(',')
+                timestamp_str = parts[0].split(': ')[1]
+                distance_str = parts[1].split(': ')[1]
+                
+                # Convert milliseconds to datetime
+                millis = int(timestamp_str)
+                timestamp = datetime.now() - pd.to_timedelta(millis, unit='ms')
+                
+                # Convert distance to float
+                distance = float(distance_str)
+                
+                # Append the data to the DataFrame
+                data = data.append({'DateTime': timestamp, 'Distance': distance}, ignore_index=True)
+                
+                # Print to console (optional)
+                print(f"{timestamp}, {distance}")
+
+except KeyboardInterrupt:
+    # Save the DataFrame to a CSV file on exit
+    data.to_csv('distance_data.csv', index=False)
+    print("Data saved to distance_data.csv")
+finally:
+    ser.close()
