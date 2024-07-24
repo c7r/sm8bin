@@ -5,11 +5,11 @@
 #include <esp_sleep.h>
 
 // Ultrasonic Sensor Pins
-#define TRIGGER_PIN  18
-#define ECHO_PIN     15
-#define MAX_DISTANCE 200 // Maximum distance to measure (in cm)
-#define MEASURE_INTERVAL_MS 100 // Interval between measurements in milliseconds
-#define MEASURE_DURATION_MS 5000 // Total duration to measure in milliseconds
+#define TRIGGER_PIN 18
+#define ECHO_PIN 15
+#define MAX_DISTANCE 200          // Maximum distance to measure (in cm)
+#define MEASURE_INTERVAL_MS 100   // Interval between measurements in milliseconds
+#define MEASURE_DURATION_MS 5000  // Total duration to measure in milliseconds
 
 // Initialize preferences
 Preferences preferences;
@@ -29,7 +29,7 @@ uint16_t measureDistance() {
   digitalWrite(TRIGGER_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIGGER_PIN, LOW);
-  
+
   // Measure the duration of the echo pulse
   unsigned long duration = pulseIn(ECHO_PIN, HIGH, MAX_DISTANCE * 58);
 
@@ -48,18 +48,18 @@ uint16_t measureAverageDistance() {
   uint32_t distanceSum = 0;
 
   while (millis() < endTime) {
-    uint16_t distance = measureDistance(); // Get distance in cm
+    uint16_t distance = measureDistance();  // Get distance in cm
     if (distance > 0) {
       distanceSum += distance;
       measurementCount++;
     }
-    delay(MEASURE_INTERVAL_MS); // Wait between measurements
+    delay(MEASURE_INTERVAL_MS);  // Wait between measurements
   }
 
   if (measurementCount > 0) {
-    return distanceSum / measurementCount; // Calculate average distance
+    return distanceSum / measurementCount;  // Calculate average distance
   } else {
-    return 0; // Return 0 if no valid measurements
+    return 0;  // Return 0 if no valid measurements
   }
 }
 
@@ -87,7 +87,7 @@ void storeMeasurement(uint32_t timestamp, uint16_t distance) {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000); // Give time for the serial monitor to open
+  delay(1000);  // Give time for the serial monitor to open
 
   // Initialize pins
   pinMode(TRIGGER_PIN, OUTPUT);
@@ -105,12 +105,22 @@ void setup() {
   // Print the stored data for debugging
   Serial.print("Stored: ");
   Serial.print(timestamp);
+  Serial.print("  s");
   Serial.print(", ");
-  Serial.println(averageDistance);
+  Serial.print(averageDistance);
+  Serial.println("  cm");
+
+int i;
+int ind = preferences.getInt("index", 0);
+
+for(i=0; i<ind; i++) {
+  String key_1 = "data" + String(i);
+  Serial.println(getString(key_1.c_str()),0);
+}
 
   // Configure deep sleep to wake up after 30 seconds
-  esp_sleep_enable_timer_wakeup(10 * 1000000); // 30 seconds in microseconds
-  esp_deep_sleep_start(); // Enter deep sleep
+  esp_sleep_enable_timer_wakeup(5 * 1000000);  // 30 seconds in microseconds
+  esp_deep_sleep_start();                      // Enter deep sleep
 }
 
 void loop() {
