@@ -1,89 +1,44 @@
-#include <Preferences.h>
-#include <Wire.h>
-#include <time.h>
-#include <HCSR04.h>
-#include <esp_sleep.h>
+#include <BLE2902.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
+#include <Preferences.h>
 
-#define TRIGGER_PIN 18
-#define ECHO_PIN 15
-#define BUTTON_PIN 4
-#define MAX_DISTANCE 200 // Maximum distance to measure (in cm)
-#define MEASURE_INTERVAL_MS 100 // Interval between measurements in milliseconds
-#define MEASURE_DURATION_MS 5000 // Total duration to measure in milliseconds
-#define BUTTON_HOLD_TIME 2000 // Time in milliseconds for button hold
-#define SLEEP_DURATION_SEC 30 // Deep sleep duration in seconds
+// Pins for sensors and button
+const int IR_SENSOR_PIN = 27;
+const int US_TRIGGER_PIN = 18;
+const int US_ECHO_PIN = 15;
+const int BUTTON_PIN = 14;
 
-Preferences preferences;
+// BLE parameters
 BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
-
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
+const char* SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const char* CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
-void initTime() {
-  configTime(0, 0, "pool.ntp.org");
-  while (time(nullptr) < 100000) {
-    delay(100);
-  }
-}
+// Operation mode
+enum Mode { MEASUREMENT_MODE, DEEP_SLEEP_MODE, STREAMING_MODE };
+Mode currentMode = MEASUREMENT_MODE;
 
-uint32_t getTime() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return tv.tv_sec;
-}
+// Timing
+const uint64_t SLEEP_INTERVAL_US = 10 * 1000000; // 30 seconds in microseconds
+const int MEASURE_INTERVAL_MS = 2000; // 2 seconds
 
-uint16_t measureDistance() {
-  digitalWrite(TRIGGER_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIGGER_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIGGER_PIN, LOW);
+// Button state
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
 
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, MAX_DISTANCE * 58);
-  uint16_t distance = duration / 58.0;
-  return distance;
-}
+// Preferences
+Preferences preferences;
+const char* PREFERENCES_NAMESPACE = "sensorData";
 
-uint16_t measureAverageDistance() {
-  uint32_t startTime = millis();
-  uint32_t endTime = startTime + MEASURE_DURATION_MS;
-  uint32_t measurementCount = 0;
-  uint32_t distanceSum = 0;
-
-  while (millis() < endTime) {
-    uint16_t distance = measureDistance();
-    if (distance > 0) {
-      distanceSum += distance;
-      measurementCount++;
-    }
-    delay(MEASURE_INTERVAL_MS);
-  }
-
-  if (measurementCount > 0) {
-    return distanceSum / measurementCount;
-  } else {
-    return 0;
-  }
-}
-
-void storeMeasurement(uint32_t timestamp, uint16_t distance) {
-  preferences.begin("storage", false);
-  int index = preferences.getInt("index", 0);
-  String key = "data" + String(index);
-  String data = String(timestamp) + "," + String(distance);
-  preferences.putString(key.c_str(), data);
-  preferences.putInt("index", index + 1);
-  preferences.end();
-}
-
-class MyServerCallbacks : public BLEServerCallbacks {
+// Callback for BLE connection status
+class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
-  };
+  }
 
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
@@ -92,80 +47,128 @@ class MyServerCallbacks : public BLEServerCallbacks {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
-  pinMode(TRIGGER_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  // Setup pins
+  pinMode(IR_SENSOR_PIN, INPUT);
+  pinMode(US_TRIGGER_PIN, OUTPUT);
+  pinMode(US_ECHO_PIN, INPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  initTime();
-  uint32_t timestamp = getTime();
-  uint16_t averageDistance = measureAverageDistance();
-  storeMeasurement(timestamp, averageDistance);
-
-  Serial.print("Stored: ");
-  Serial.print(timestamp);
-  Serial.print(", ");
-  Serial.println(averageDistance);
-
-  BLEDevice::init("ESP32DistanceSensor");
+  // Setup BLE
+  BLEDevice::init("ESP32_BLE");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  BLEService *pService = pServer->createService(BLEUUID((uint16_t)0x181A));
+  BLEService *pService = pServer->createService(SERVICE_UUID);
   pCharacteristic = pService->createCharacteristic(
-                      BLEUUID((uint16_t)0x2A6E),
+                      CHARACTERISTIC_UUID,
                       BLECharacteristic::PROPERTY_READ |
                       BLECharacteristic::PROPERTY_NOTIFY
                     );
+  pCharacteristic->addDescriptor(new BLE2902());
   pService->start();
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(BLEUUID((uint16_t)0x181A));
-  pAdvertising->start();
+  pServer->getAdvertising()->start();
 
-  esp_sleep_enable_timer_wakeup(SLEEP_DURATION_SEC * 1000000);
-  esp_deep_sleep_start();
-}
-
-void streamDataOverBLE() {
-  preferences.begin("storage", true);
-  int index = preferences.getInt("index", 0);
-
-  for (int i = 0; i < index; i++) {
-    String key = "data" + String(i);
-    String data = preferences.getString(key.c_str(), "");
-    if (data != "") {
-      pCharacteristic->setValue(data.c_str());
-      pCharacteristic->notify();
-      delay(100); // Small delay to ensure data is sent
-    }
-  }
-
-  preferences.end();
+  // Start in measurement mode
+  measureAndSleep();
 }
 
 void loop() {
-  static uint32_t buttonPressStart = 0;
-
+  // Check button press for mode change
   if (digitalRead(BUTTON_PIN) == LOW) {
-    if (buttonPressStart == 0) {
-      buttonPressStart = millis();
-    } else if (millis() - buttonPressStart > BUTTON_HOLD_TIME) {
-      if (deviceConnected) {
-        streamDataOverBLE();
+    if (!buttonPressed) {
+      buttonPressed = true;
+      buttonPressTime = millis();
+    } else {
+      if (millis() - buttonPressTime > 2000) { // 2 seconds
+        enterStreamingMode();
       }
     }
   } else {
-    buttonPressStart = 0;
+    buttonPressed = false;
   }
 
-  if (!deviceConnected && oldDeviceConnected) {
-    delay(500);
+  // Handle BLE connection status
+  if (deviceConnected) {
+    if (!oldDeviceConnected) {
+      oldDeviceConnected = deviceConnected;
+    }
+  } else if (oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
     pServer->startAdvertising();
-    oldDeviceConnected = deviceConnected;
+  }
+}
+
+void measureAndSleep() {
+  currentMode = MEASUREMENT_MODE;
+  Serial.println("Measuring...");
+
+  int irDistance = 0;
+  int usDistance = 0;
+  for (int i = 0; i < 10; i++) { // Take multiple samples for averaging
+    irDistance += analogRead(IR_SENSOR_PIN);
+    usDistance += getUltrasonicDistance();
+    delay(200);
+  }
+  irDistance /= 10;
+  usDistance /= 10;
+
+  // Save measurements with timestamp
+  preferences.begin(PREFERENCES_NAMESPACE, false);
+  unsigned long timestamp = millis();
+  preferences.putInt("irDistance", irDistance);
+  preferences.putInt("usDistance", usDistance);
+  preferences.putULong("timestamp", timestamp);
+  preferences.end();
+  
+  Serial.printf("IR Distance: %d, US Distance: %d, Timestamp: %lu\n", irDistance, usDistance, timestamp);
+
+  // Go to deep sleep
+  currentMode = DEEP_SLEEP_MODE;
+  Serial.println("Entering deep sleep...");
+  esp_sleep_enable_timer_wakeup(SLEEP_INTERVAL_US);
+  esp_deep_sleep_start();
+}
+
+void enterStreamingMode() {
+  currentMode = STREAMING_MODE;
+  Serial.println("Streaming mode activated");
+
+  while (digitalRead(BUTTON_PIN) == LOW) {
+    // Stay in streaming mode until button is released
+    delay(10);
   }
 
-  if (deviceConnected && !oldDeviceConnected) {
-    oldDeviceConnected = deviceConnected;
+  preferences.begin(PREFERENCES_NAMESPACE, true);
+  int irDistance = preferences.getInt("irDistance", 0);
+  int usDistance = preferences.getInt("usDistance", 0);
+  unsigned long timestamp = preferences.getULong("timestamp", 0);
+  preferences.end();
+
+  while (true) {
+    String data = "IR Distance: " + String(irDistance) + ", US Distance: " + String(usDistance) + ", Timestamp: " + String(timestamp);
+    pCharacteristic->setValue(data.c_str());
+    pCharacteristic->notify();
+    delay(1000); // Stream data every second
+
+    // Check button press to return to measurement mode
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      delay(2000); // 2 seconds to switch back
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        measureAndSleep();
+      }
+    }
   }
+}
+
+int getUltrasonicDistance() {
+  digitalWrite(US_TRIGGER_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(US_TRIGGER_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(US_TRIGGER_PIN, LOW);
+
+  long duration = pulseIn(US_ECHO_PIN, HIGH);
+  int distance = duration * 0.034 / 2;
+  return distance;
 }
