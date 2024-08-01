@@ -1,0 +1,140 @@
+#include <Arduino.h>
+#include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <nvs_flash.h>
+
+#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define DISCONNECT_TIMEOUT  300000 // 5 minutes in milliseconds
+
+Preferences preferences;
+const char* preferencesNamespace = "measurements";
+const int numMeasurements = 10;
+unsigned long lastConnectionTime = 0;
+
+// Structure to hold measurement data
+struct Measurement {
+  uint32_t timestamp;
+  int32_t value;
+};
+
+// Function to generate random measurements and save them in Preferences
+void generateMeasurements() {
+  preferences.begin(preferencesNamespace, false);
+  if (!preferences.getBool("initialized", false)) {
+    Serial.println("Generating and saving measurements...");
+    for (int i = 0; i < numMeasurements; i++) {
+      Measurement m;
+      m.timestamp = random(1609459200, 1672444800); // Random Unix timestamp for 2021-2023
+      m.value = random(0, 51); // Random value between 0 and 50
+      preferences.putUInt(("ts" + String(i)).c_str(), m.timestamp);
+      preferences.putInt(("val" + String(i)).c_str(), m.value);
+
+      // Print the generated data
+      Serial.printf("Generated Measurement %d: Timestamp = %u, Value = %d\n", i, m.timestamp, m.value);
+    }
+    preferences.putBool("initialized", true);
+  }
+  preferences.end();
+}
+
+// Function to retrieve measurements from Preferences and format them as a CSV string
+String getMeasurementsCSV() {
+  Measurement measurements[numMeasurements];
+  preferences.begin(preferencesNamespace, true);
+  Serial.println("Retrieving measurements data from Preferences:");
+  String csvData = "Timestamp,Value\n";
+  for (int i = 0; i < numMeasurements; i++) {
+    measurements[i].timestamp = preferences.getUInt(("ts" + String(i)).c_str(), 0);
+    measurements[i].value = preferences.getInt(("val" + String(i)).c_str(), 0);
+    csvData += String(measurements[i].timestamp) + "," + String(measurements[i].value) + "\n";
+    
+    // Print the retrieved data
+    Serial.printf("Retrieved Measurement %d: Timestamp = %u, Value = %d\n", i, measurements[i].timestamp, measurements[i].value);
+  }
+  preferences.end();
+  return csvData;
+}
+
+// BLE variables
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+bool deviceConnected = false;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      lastConnectionTime = millis();
+      Serial.println("Device connected via BLE.");
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("Device disconnected.");
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onRead(BLECharacteristic* pCharacteristic) {
+      Serial.println("Data read by client.");
+
+      // Retrieve the measurements CSV
+      String csvData = getMeasurementsCSV();
+      
+      // Print the complete transferred dataset
+      Serial.println("Transferred dataset:");
+      Serial.println(csvData);
+      
+      // Set the characteristic value to be read by the client
+      pCharacteristic->setValue(csvData.c_str());
+    }
+};
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize NVS
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    // NVS partition was truncated and needs to be erased
+    nvs_flash_erase();
+    err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    Serial.printf("NVS initialization failed with error: %s\n", esp_err_to_name(err));
+    while (true); // Halt if NVS initialization failed
+  }
+
+  // Generate and save random measurements if not already done
+  generateMeasurements();
+  
+  // Print and retrieve the complete measurements data
+  String csvData = getMeasurementsCSV();
+  Serial.println(csvData);
+
+  // Initialize BLE
+  BLEDevice::init("BSR_smart_bin");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ
+                    );
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting for a client connection to notify...");
+}
+
+void loop() {
+  if (deviceConnected) {
+    if (millis() - lastConnectionTime > DISCONNECT_TIMEOUT) {
+      pServer->disconnect(pServer->getConnId());
+    }
+  }
+}
