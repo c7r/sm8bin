@@ -26,10 +26,19 @@ void generateMeasurements() {
   preferences.begin(preferencesNamespace, false);
   if (!preferences.getBool("initialized", false)) {
     Serial.println("Generating and saving measurements...");
+    
+    // Generate ten values in decreasing order from 50 to 20 with random intervals
+    int values[numMeasurements];
+    values[0] = 50;
+    for (int i = 1; i < numMeasurements; i++) {
+      int randomInterval = random(1, (values[i - 1] - 20) / (numMeasurements - i));
+      values[i] = values[i - 1] - randomInterval;
+    }
+    
     for (int i = 0; i < numMeasurements; i++) {
       Measurement m;
       m.timestamp = random(1609459200, 1672444800); // Random Unix timestamp for 2021-2023
-      m.value = random(0, 51); // Random value between 0 and 50
+      m.value = values[i];
       preferences.putUInt(("ts" + String(i)).c_str(), m.timestamp);
       preferences.putInt(("val" + String(i)).c_str(), m.value);
 
