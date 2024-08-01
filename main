@@ -1,128 +1,190 @@
+#include <Arduino.h>
 #include <Preferences.h>
-#include <Wire.h>
-#include <time.h>
-#include <HCSR04.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <Ultrasonic.h>
+#include <nvs_flash.h>
 #include <esp_sleep.h>
 
-// Ultrasonic Sensor Pins
-#define TRIGGER_PIN 18
-#define ECHO_PIN 15
-#define MAX_DISTANCE 200          // Maximum distance to measure (in cm)
-#define MEASURE_INTERVAL_MS 100   // Interval between measurements in milliseconds
-#define MEASURE_DURATION_MS 5000  // Total duration to measure in milliseconds
+#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BUTTON_PIN          0 // Define your button pin here
+#define ECHO_PIN            4 // Define your ultrasonic sensor echo pin
+#define DISCONNECT_TIMEOUT  180000 // 3 minutes in milliseconds
+#define DEEP_SLEEP_DURATION 120e6  // 2 minutes in microseconds
 
-// Initialize preferences
 Preferences preferences;
+const char* preferencesNamespace = "measurements";
+const int numMeasurements = 10;
+unsigned long lastConnectionTime = 0;
+unsigned long lastButtonPressTime = 0;
+bool deviceConnected = false;
+int mode = 0; // 0 = measurement mode, 1 = deep sleep mode, 2 = streaming mode
+bool buttonPressedTwice = false;
 
-// Function to get the current time as a Unix timestamp
-uint32_t getTime() {
-  struct timeval tv;
-  gettimeofday(&tv, NULL);
-  return tv.tv_sec;
-}
+Ultrasonic ultrasonic(ECHO_PIN);
 
-// Function to measure distance
-uint16_t measureDistance() {
-  // Send a 10us pulse to trigger the sensor
-  digitalWrite(TRIGGER_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIGGER_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIGGER_PIN, LOW);
+struct Measurement {
+  uint32_t timestamp;
+  int32_t value;
+};
 
-  // Measure the duration of the echo pulse
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, MAX_DISTANCE * 58);
+// Function to generate and save actual measurements
+void generateMeasurements() {
+  preferences.begin(preferencesNamespace, false);
+  if (!preferences.getBool("initialized", false)) {
+    Serial.println("Generating and saving measurements...");
+    for (int i = 0; i < numMeasurements; i++) {
+      Measurement m;
+      long distance = ultrasonic.MeasureInCentimeters();
+      m.value = distance;
+      m.timestamp = (uint32_t)time(NULL); // Unix timestamp
 
-  // Calculate the distance in cm
-  uint16_t distance = duration / 58.0;
+      preferences.putUInt(("ts" + String(i)).c_str(), m.timestamp);
+      preferences.putInt(("val" + String(i)).c_str(), m.value);
 
-  // Return the measured distance
-  return distance;
-}
-
-// Function to measure distance multiple times and calculate average
-uint16_t measureAverageDistance() {
-  uint32_t startTime = millis();
-  uint32_t endTime = startTime + MEASURE_DURATION_MS;
-  uint32_t measurementCount = 0;
-  uint32_t distanceSum = 0;
-
-  while (millis() < endTime) {
-    uint16_t distance = measureDistance();  // Get distance in cm
-    if (distance > 0) {
-      distanceSum += distance;
-      measurementCount++;
+      Serial.printf("Measured and saved Measurement %d: Timestamp = %u, Value = %d\n", i, m.timestamp, m.value);
     }
-    delay(MEASURE_INTERVAL_MS);  // Wait between measurements
+    preferences.putBool("initialized", true);
   }
-
-  if (measurementCount > 0) {
-    return distanceSum / measurementCount;  // Calculate average distance
-  } else {
-    return 0;  // Return 0 if no valid measurements
-  }
+  preferences.end();
 }
 
-// Function to store data
-void storeMeasurement(uint32_t timestamp, uint16_t distance) {
-  // Open preferences with namespace "storage"
-  preferences.begin("storage", false);
-
-  // Get the current index
-  int index = preferences.getInt("index", 0);
-
-  // Create a key for the current index
-  String key = "data" + String(index);
-
-  // Store the timestamp and distance as a single string
-  String data = String(timestamp) + "," + String(distance);
-  preferences.putString(key.c_str(), data);
-
-  // Increment and store the new index
-  preferences.putInt("index", index + 1);
-
-  // Close preferences
+void getMeasurementsArray(uint8_t* data) {
+  Measurement measurements[numMeasurements];
+  preferences.begin(preferencesNamespace, true);
+  Serial.println("Retrieving measurements data from Preferences:");
+  for (int i = 0; i < numMeasurements; i++) {
+    measurements[i].timestamp = preferences.getUInt(("ts" + String(i)).c_str(), 0);
+    measurements[i].value = preferences.getInt(("val" + String(i)).c_str(), 0);
+    memcpy(data + (i * 8), &measurements[i].timestamp, 4);
+    memcpy(data + (i * 8) + 4, &measurements[i].value, 4);
+    
+    Serial.printf("Retrieved Measurement %d: Timestamp = %u, Value = %d\n", i, measurements[i].timestamp, measurements[i].value);
+  }
   preferences.end();
+}
+
+void getMeasurementsCSV(char* csv) {
+  preferences.begin(preferencesNamespace, true);
+  strcpy(csv, "Timestamp,Value\n");
+  for (int i = 0; i < numMeasurements; i++) {
+    uint32_t ts = preferences.getUInt(("ts" + String(i)).c_str(), 0);
+    int32_t val = preferences.getInt(("val" + String(i)).c_str(), 0);
+    char line[32];
+    sprintf(line, "%u,%d\n", ts, val);
+    strcat(csv, line);
+  }
+  preferences.end();
+}
+
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      lastConnectionTime = millis();
+      Serial.println("Device connected via BLE.");
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("Device disconnected.");
+      esp_sleep_enable_timer_wakeup(DEEP_SLEEP_DURATION);
+      esp_deep_sleep_start();
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onRead(BLECharacteristic* pCharacteristic) {
+      Serial.println("Data read by client.");
+      char csv[1024];
+      getMeasurementsCSV(csv);
+      pCharacteristic->setValue((uint8_t*)csv, strlen(csv));
+
+      Serial.println("Transferred dataset:");
+      Serial.println(csv);
+    }
+};
+
+void enterDeepSleep() {
+  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_DURATION);
+  esp_deep_sleep_start();
+}
+
+void setupBLE() {
+  BLEDevice::init("BSR_smart_bin");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ
+                    );
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting for a client connection to notify...");
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);  // Give time for the serial monitor to open
 
-  // Initialize pins
-  pinMode(TRIGGER_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    Serial.printf("NVS initialization failed with error: %s\n", esp_err_to_name(err));
+    while (true); 
+  }
 
-  // Get the current timestamp
-  uint32_t timestamp = getTime();
-
-  // Measure average distance over 5 seconds
-  uint16_t averageDistance = measureAverageDistance();
-
-  // Store the measurement
-  storeMeasurement(timestamp, averageDistance);
-
-  // Print the stored data for debugging
-  Serial.print("Stored: ");
-  Serial.print(timestamp);
-  Serial.print("  s");
-  Serial.print(", ");
-  Serial.print(averageDistance);
-  Serial.println("  cm");
-
-int i;
-int ind = preferences.getInt("index", 0);
-
-for(i=0; i<ind; i++) {
-  String key_1 = "data" + String(i);
-  Serial.println(getString(key_1.c_str()),0);
-}
-
-  // Configure deep sleep to wake up after 30 seconds
-  esp_sleep_enable_timer_wakeup(5 * 1000000);  // 30 seconds in microseconds
-  esp_deep_sleep_start();                      // Enter deep sleep
+  pinMode(BUTTON_PIN, INPUT);
+  mode = 1; // Start in deep sleep mode
+  enterDeepSleep();
 }
 
 void loop() {
-  // No need to use loop as the ESP32 will be in deep sleep
+  if (mode == 0) { 
+    // Measurement Mode
+    generateMeasurements();
+    mode = 1;
+    enterDeepSleep();
+  } else if (mode == 1) { 
+    // Deep Sleep Mode
+    if (digitalRead(BUTTON_PIN) == HIGH) {
+      unsigned long currentTime = millis();
+      if (currentTime - lastButtonPressTime < 1000) {
+        buttonPressedTwice = true;
+      }
+      lastButtonPressTime = currentTime;
+    }
+    if (buttonPressedTwice) {
+      delay(2000); 
+      buttonPressedTwice = false;
+      mode = 2; 
+      setupBLE();
+    }
+  } else if (mode == 2) { 
+    // Streaming Mode
+    if (deviceConnected) {
+      if (millis() - lastConnectionTime > DISCONNECT_TIMEOUT) {
+        pServer->disconnect(pServer->getConnId());
+      }
+    }
+    if (digitalRead(BUTTON_PIN) == HIGH) {
+      unsigned long pressTime = millis();
+      while (digitalRead(BUTTON_PIN) == HIGH) {
+        if (millis() - pressTime > 2000) {
+          mode = 1;
+          enterDeepSleep();
+        }
+      }
+    }
+  }
 }
