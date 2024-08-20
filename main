@@ -10,8 +10,8 @@
 
 #define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
-#define BUTTON_PIN          0 // Define your button pin here
-#define ECHO_PIN            4 // Define your ultrasonic sensor echo pin
+#define BUTTON_PIN          13 // Define your button pin here
+#define ECHO_PIN            10 // Define your ultrasonic sensor echo pin
 #define DISCONNECT_TIMEOUT  180000 // 3 minutes in milliseconds
 #define DEEP_SLEEP_DURATION 120e6  // 2 minutes in microseconds
 
@@ -132,7 +132,7 @@ void setupBLE() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
 
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
