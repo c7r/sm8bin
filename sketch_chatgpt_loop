@@ -1,0 +1,184 @@
+#include <Arduino.h>
+#include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <Ultrasonic.h>
+#include <nvs_flash.h>
+#include <esp_sleep.h>
+
+#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BUTTON_PIN          12 // Define your button pin here
+#define ECHO_PIN            10 // Define your ultrasonic sensor echo pin
+#define DISCONNECT_TIMEOUT  180000 // 3 minutes in milliseconds
+#define DEEP_SLEEP_DURATION 5000 // 120e6  2 minutes in microseconds
+
+Preferences preferences;
+const char* preferencesNamespace = "measurements";
+const int numMeasurements = 10;
+unsigned long lastConnectionTime = 0;
+unsigned long lastButtonPressTime = 0;
+bool deviceConnected = false;
+int mode = 0; // 0 = setup mode, 1 = deep sleep mode, 2 = measurement mode, 3 = streaming mode
+bool buttonPressedTwice = false;
+
+Ultrasonic ultrasonic(ECHO_PIN);
+
+struct Measurement {
+  uint32_t timestamp;
+  int32_t value;
+};
+
+void generateMeasurements() {
+  preferences.begin(preferencesNamespace, false);
+  Measurement m;
+  long distance = ultrasonic.MeasureInCentimeters();
+  m.value = distance;
+  m.timestamp = (uint32_t)time(NULL); // Unix timestamp
+
+  preferences.putUInt("ts", m.timestamp);
+  preferences.putInt("val", m.value);
+
+  Serial.printf("Measured and saved: Timestamp = %u, Value = %d\n", m.timestamp, m.value);
+  preferences.end();
+}
+
+void getMeasurementsCSV(char* csv) {
+  preferences.begin(preferencesNamespace, true);
+  strcpy(csv, "Timestamp,Value\n");
+  uint32_t ts = preferences.getUInt("ts", 0);
+  int32_t val = preferences.getInt("val", 0);
+  char line[32];
+  sprintf(line, "%u,%d\n", ts, val);
+  strcat(csv, line);
+  preferences.end();
+}
+
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      lastConnectionTime = millis();
+      Serial.println("Device connected via BLE.");
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("Device disconnected.");
+      mode = 1;  // Transition back to deep sleep mode on disconnect
+      enterDeepSleep();
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onRead(BLECharacteristic* pCharacteristic) {
+      Serial.println("Data read by client.");
+      char csv[1024];
+      getMeasurementsCSV(csv);
+      pCharacteristic->setValue((uint8_t*)csv, strlen(csv));
+      Serial.println("Transferred dataset:");
+      Serial.println(csv);
+    }
+};
+
+void enterDeepSleep() {
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_12, 0); // Wake up on button press (GPIO 12 low)
+
+  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_DURATION);
+  Serial.println("Entering deep sleep mode...");
+  esp_deep_sleep_start();
+}
+
+void setupBLE() {
+  BLEDevice::init("BSR_smart_bin");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ
+                    );
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting for a client connection to notify...");
+}
+
+void setup() {
+  Serial.begin(921600);
+
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    Serial.printf("NVS initialization failed with error: %s\n", esp_err_to_name(err));
+    while (true); 
+  }
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);  // Configure button pin with internal pull-up
+    Serial.println("mode is 0");
+  mode = 0;  // Start in setup mode
+
+}
+
+void loop() {
+  if (mode == 0) { 
+Serial.println("mode is 0 initial setup");
+    // Setup Mode: Wait for double button press to enter deep sleep
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      unsigned long currentTime = millis();
+      if (currentTime - lastButtonPressTime < 1000) { // Double press within 1 second
+        buttonPressedTwice = true;
+      }
+      lastButtonPressTime = currentTime;
+    }
+    if (buttonPressedTwice) {
+      Serial.println("button pressed twice = true");
+      buttonPressedTwice = false;
+      mode = 1; // Transition to deep sleep mode
+      Serial.println("mode is 1, enter deepsleep");
+      enterDeepSleep();
+    }
+  } else if (mode == 1) { 
+    // Deep Sleep Mode: Wake up automatically or by button press
+    Serial.println("Waking up from deep sleep...");
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+      unsigned long pressTime = millis();
+      while (digitalRead(BUTTON_PIN) == LOW) {
+        if (millis() - pressTime > 3000) {  // Long press (> 3 seconds)
+          mode = 3; // Transition to streaming mode
+          setupBLE();
+          return;
+        }
+      }
+      if (millis() - pressTime < 1000) {  // Short press (< 1 second)
+        mode = 2; // Transition to measurement mode
+        generateMeasurements();
+        mode = 1; // Transition back to deep sleep mode
+        enterDeepSleep();
+      }
+    } else {
+      mode = 2; // Transition to measurement mode automatically after wake-up
+      generateMeasurements();
+      mode = 1; // Transition back to deep sleep mode
+      enterDeepSleep();
+    }
+  } else if (mode == 3) { 
+    // Streaming Mode: Wait for disconnect or timeout
+    if (deviceConnected) {
+      if (millis() - lastConnectionTime > DISCONNECT_TIMEOUT) {
+        pServer->disconnect(pServer->getConnId());  // Disconnect after timeout
+      }
+    } else {
+      mode = 1;  // Transition back to deep sleep mode on disconnect
+      enterDeepSleep();
+    }
+  }
+}
