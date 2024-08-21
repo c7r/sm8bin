@@ -1,0 +1,192 @@
+#include <Arduino.h>
+#include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <Ultrasonic.h>
+#include <nvs_flash.h>
+#include <esp_sleep.h>
+
+#define SERVICE_UUID          "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BUTTON_PIN            12
+#define ECHO_PIN              10
+#define DISCONNECT_TIMEOUT    180000 // 3 minutes in milliseconds
+#define DEEP_SLEEP_DURATION   10000000 // 10 seconds in microseconds
+
+Preferences preferences;
+const char* preferencesNamespace = "measurements";
+const int numMeasurements = 10;
+unsigned long lastConnectionTime = 0;
+unsigned long lastButtonPressTime = 0;
+bool deviceConnected = false;
+
+enum State {
+  START,
+  DEEP_SLEEP,
+  MEASUREMENT,
+  STREAMING
+};
+
+State currentState = START;
+bool buttonPressedTwice = false;
+
+Ultrasonic ultrasonic(ECHO_PIN);
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+
+struct Measurement {
+  uint32_t timestamp;
+  int32_t value;
+};
+
+void setupBLE();
+void enterDeepSleep();
+void generateMeasurements();
+void transitionToState(State newState);
+
+void IRAM_ATTR handleButtonPress() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastButtonPressTime < 1000) { 
+    buttonPressedTwice = true;
+  }
+  lastButtonPressTime = currentTime;
+}
+
+void generateMeasurements() {
+  preferences.begin(preferencesNamespace, false);
+  for (int i = 0; i < numMeasurements; i++) {
+    Measurement m;
+    long distance = ultrasonic.MeasureInCentimeters();
+    m.value = distance;
+    m.timestamp = (uint32_t)time(NULL);
+
+    preferences.putUInt(("ts" + String(i)).c_str(), m.timestamp);
+    preferences.putInt(("val" + String(i)).c_str(), m.value);
+
+    Serial.printf("Measurement %d: Timestamp = %u, Value = %d\n", i, m.timestamp, m.value);
+  }
+  preferences.end();
+  transitionToState(DEEP_SLEEP);
+}
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      lastConnectionTime = millis();
+      Serial.println("Device connected via BLE.");
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("Device disconnected.");
+      transitionToState(DEEP_SLEEP);
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onRead(BLECharacteristic* pCharacteristic) {
+      Serial.println("Data read by client.");
+      char csv[1024];
+      preferences.begin(preferencesNamespace, true);
+      strcpy(csv, "Timestamp,Value\n");
+      for (int i = 0; i < numMeasurements; i++) {
+        uint32_t ts = preferences.getUInt(("ts" + String(i)).c_str(), 0);
+        int32_t val = preferences.getInt(("val" + String(i)).c_str(), 0);
+        char line[32];
+        sprintf(line, "%u,%d\n", ts, val);
+        strcat(csv, line);
+      }
+      preferences.end();
+      pCharacteristic->setValue((uint8_t*)csv, strlen(csv));
+
+      Serial.println("Transferred dataset:");
+      Serial.println(csv);
+    }
+};
+
+void enterDeepSleep() {
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_12, 0); 
+  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_DURATION);
+  Serial.println("Entering deep sleep mode...");
+  esp_deep_sleep_start();
+}
+
+void setupBLE() {
+  BLEDevice::init("BSR_smart_bin");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ
+                    );
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting for a client connection to notify...");
+}
+
+void transitionToState(State newState) {
+  currentState = newState;
+
+  switch (currentState) {
+    case START:
+      pinMode(BUTTON_PIN, INPUT_PULLUP);
+      attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonPress, FALLING);
+      lastButtonPressTime = millis();
+      if (buttonPressedTwice) {
+        transitionToState(DEEP_SLEEP);
+      }
+      break;
+
+    case DEEP_SLEEP:
+      buttonPressedTwice = false;
+      enterDeepSleep();
+      break;
+
+    case MEASUREMENT:
+      generateMeasurements();
+      transitionToState(DEEP_SLEEP);
+      break;
+
+    case STREAMING:
+      setupBLE();
+      while (deviceConnected && (millis() - lastConnectionTime < DISCONNECT_TIMEOUT)) {
+        if (digitalRead(BUTTON_PIN) == LOW) {
+          unsigned long pressTime = millis();
+          while (digitalRead(BUTTON_PIN) == LOW) {
+            if (millis() - pressTime > 3000) {
+              transitionToState(DEEP_SLEEP);
+              return;
+            }
+          }
+        }
+      }
+      if (!deviceConnected) {
+        transitionToState(DEEP_SLEEP);
+      }
+      break;
+  }
+}
+
+void setup() {
+  Serial.begin(921600);
+
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    nvs_flash_erase();
+    err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    Serial.printf("NVS initialization failed with error: %s\n", esp_err_to_name(err));
+    while (true);
+  }
+
+  transitionToState(START);
+}
+
+void loop(){}
