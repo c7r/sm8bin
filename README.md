@@ -1,11 +1,10 @@
-Dokumentation für ESP32-Zustandsmaschine mit Ultraschallmessung und BLE-Streaming
+Dokumentation für ESP32-Microcontroller mit Ultraschallmessung und BLE-Streaming
 1. Hardwareanforderungen:
 
-ESP32-Entwicklungsboard: Der Kernmikrocontroller, der zum Ausführen des Codes verwendet wird, mit Wi-Fi- und BLE-Funktionen.
-Ultraschallsensor (z. B. HC-SR04): Wird zur Entfernungsmessung verwendet. Verbunden mit GPIO 10.
-Druckknopf: Verbunden mit GPIO 12, wird verwendet, um den ESP32 aus dem Tiefschlaf zu wecken und bestimmte Modi auszulösen.
-Stromversorgung: Eine geeignete Stromquelle für das ESP32-Entwicklungsboard.
-Optional: Zusätzliche Komponenten wie Widerstände oder Kondensatoren, abhängig von Ihrer spezifischen Verdrahtung für den Druckknopf und den Ultraschallsensor.
+ESP32-Entwicklungsboard: Mikrocontroller, der zum Ausführen des Codes verwendet wird, mit Wi-Fi- und BLE-Funktionen.
+Ultraschallsensor Grove Ultrasonic Ranger: Wird zur Entfernungsmessung verwendet. Verbunden mit GPIO 10; hat eigene Auswertungsplatine.
+Druckknopf: Verbunden mit GPIO 12, wird verwendet, um den ESP32 aus dem Tiefschlaf zu wecken und Stream-Modus auszulösen.
+Stromversorgung: Eine USB- oder Akku-Stromquelle für das ESP32-Entwicklungsboard.
 
 2. Betriebsmodi:
 
@@ -78,4 +77,4 @@ Die Hauptschleifenfunktion, die wiederholt ausgeführt wird. Sie prüft den aktu
 
 Fazit:
 
-Dieser Code implementiert eine Zustandsmaschine auf dem ESP32, die verschiedene Betriebsmodi unterstützt: NVS-Reset, Tiefschlaf, Ultraschallmessung und BLE-Datenstreaming. Der ESP32 wechselt basierend auf Weckbedingungen und Timeouts zwischen diesen Modi, was ihn ideal für Anwendungen mit geringem Stromverbrauch macht, die regelmäßige Messungen und drahtlose Datenübertragung erfordern.
+Dieser Code implementiert eine Statemachine-Logik auf dem ESP32, die verschiedene Betriebsmodi unterstützt: NVS-Reset, Tiefschlaf, Ultraschallmessung und BLE-Datenstreaming. Der ESP32 wechselt basierend auf Weckbedingungen und Timeouts zwischen diesen Modi, was ihn ideal für Anwendungen mit geringem Stromverbrauch macht, die regelmäßige Messungen und drahtlose Datenübertragung erfordern.
