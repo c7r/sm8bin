@@ -1,0 +1,92 @@
+#include <esp_sleep.h>
+#include <nvs_flash.h>
+
+#define BUTTON_PIN 12  // GPIO pin where the button is connected
+
+// State machine modes
+enum Mode {
+    MODE_0,
+    MODE_1,
+    MODE_2,
+    MODE_3
+};
+
+Mode currentMode = MODE_0; // Start from mode 0
+
+void setup() {
+    // Initialize serial communication
+    Serial.begin(115200);
+    // Set the button pin as input with an internal pull-down resistor
+    pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+    Serial.println("Setup complete");
+    // Enter mode 0 after setup
+    currentMode = MODE_0;
+}
+
+void enterMode0() {
+delay(2000);  // Simulate some delay or processing
+Serial.println("enter mode 0, check for nvs reset");
+delay(2000);  // Simulate some delay or processing
+
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+        Serial.println("Deep sleep over, go to mode two MEASURING MODE");
+        currentMode = MODE_2;
+    }
+    else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+       Serial.println("Deep sleep over due to BUTTON, go to STREAMING MODE");
+       currentMode = MODE_3;
+    }
+    else {
+      // Initialize NVS
+      nvs_flash_init();
+      // Erase NVS memory (if needed)
+      nvs_flash_erase();
+      Serial.println("nvs successfully deleted");  
+      currentMode = MODE_2;
+    }
+  
+}
+
+void enterMode1() {
+    Serial.println("mode 1 DEEP SLEEP MODE");
+    Serial.println("for 25 sec");
+
+    // Configure wake up by timer and external button
+    esp_sleep_enable_timer_wakeup(25*1000000); // 5 seconds in microsecond
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_12, 1); // Wake up when button is pressed (assuming active low)
+    // Enter deep sleep mode
+    esp_deep_sleep_start();
+}
+
+void enterMode2() {
+    Serial.println("enter mode 2: MEASURING MODE");
+    delay(1000);  // Simulate some delay or processing
+    currentMode = MODE_1; // Automatically transition to mode 1
+}
+
+void enterMode3() {
+    Serial.println("enter mode 3: STREAMING MODE");
+    delay(5000);  // Stay in mode 3 for 5 seconds
+    Serial.println("WAITING FOR CONNECTION");
+    currentMode = MODE_1;  // Return to mode 1 after 5 seconds
+}
+
+void loop() {
+  Serial.println("enter void loop");
+    // State machine handling
+    switch (currentMode) {
+        case MODE_0:
+            enterMode0();
+            break;
+        case MODE_1:
+            enterMode1();
+            break;
+
+        case MODE_2:
+            enterMode2();
+            break;    
+        case MODE_3:
+            enterMode3();
+            break;
+    }
+}
